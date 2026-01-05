@@ -23,7 +23,7 @@ CAPTION_MODELS = {
     'git-large-coco': 'microsoft/git-large-coco',           # 1.58GB
 }
 
-CACHE_URL_BASE = 'https://huggingface.co/pharmapsychotic/ci-preprocess/resolve/main/'
+CACHE_URL_BASE = 'https://huggingface.co/pharma/ci-preprocess/resolve/main/'
 
 
 @dataclass 
@@ -49,7 +49,7 @@ class Config:
     download_cache: bool = True # when true, cached embeds are downloaded from huggingface
     chunk_size: int = 2048      # batch size for CLIP, use smaller for lower VRAM
     data_path: str = os.path.join(os.path.dirname(__file__), 'data')
-    device: str = ("mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu")
+    device: str = ("mps" if torch.backends.mps.is_available() else "xpu" if torch.xpu.is_available() else "cpu")
     flavor_intermediate_count: int = 2048
     quiet: bool = False # when quiet progress bars are not shown
 
@@ -64,7 +64,7 @@ class Interrogator():
     def __init__(self, config: Config):
         self.config = config
         self.device = config.device
-        self.dtype = torch.float16 if self.device == 'cuda' else torch.float32
+        self.dtype = torch.float16 if self.device == 'xpu' else torch.float32
         self.caption_offloaded = True
         self.clip_offloaded = True
         self.load_caption_model()
@@ -77,11 +77,11 @@ class Interrogator():
 
             model_path = CAPTION_MODELS[self.config.caption_model_name]
             if self.config.caption_model_name.startswith('git-'):
-                caption_model = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype=torch.float32)
+                caption_model = AutoModelForCausalLM.from_pretrained(model_path, dtype=torch.float32)
             elif self.config.caption_model_name.startswith('blip2-'):
-                caption_model = Blip2ForConditionalGeneration.from_pretrained(model_path, torch_dtype=self.dtype)
+                caption_model = Blip2ForConditionalGeneration.from_pretrained(model_path, dtype=self.dtype)
             else:
-                caption_model = BlipForConditionalGeneration.from_pretrained(model_path, torch_dtype=self.dtype)
+                caption_model = BlipForConditionalGeneration.from_pretrained(model_path, dtype=self.dtype)
             self.caption_processor = AutoProcessor.from_pretrained(model_path)
 
             caption_model.eval()
@@ -105,7 +105,7 @@ class Interrogator():
             self.clip_model, _, self.clip_preprocess = open_clip.create_model_and_transforms(
                 clip_model_name, 
                 pretrained=clip_model_pretrained_name, 
-                precision='fp16' if config.device == 'cuda' else 'fp32',
+                precision='fp16' if config.device == 'xpu' else 'fp32',
                 device=config.device,
                 jit=False,
                 cache_dir=config.clip_model_path
@@ -116,7 +116,7 @@ class Interrogator():
             self.clip_preprocess = config.clip_preprocess
         self.tokenize = open_clip.get_tokenizer(clip_model_name)
 
-        sites = ['Artstation', 'behance', 'cg society', 'cgsociety', 'deviantart', 'dribbble', 
+        sites = ['Artstation', 'behance', 'cg society', 'cgsociety', 'deviantart', 'dribble', 
                  'flickr', 'instagram', 'pexels', 'pinterest', 'pixabay', 'pixiv', 'polycount', 
                  'reddit', 'shutterstock', 'tumblr', 'unsplash', 'zbrush central']
         trending_list = [site for site in sites]
@@ -197,7 +197,7 @@ class Interrogator():
     def image_to_features(self, image: Image) -> torch.Tensor:
         self._prepare_clip()
         images = self.clip_preprocess(image).unsqueeze(0).to(self.device)
-        with torch.no_grad(), torch.cuda.amp.autocast():
+        with torch.no_grad(), torch.amp.autocast("xpu"):
             image_features = self.clip_model.encode_image(images)
             image_features /= image_features.norm(dim=-1, keepdim=True)
         return image_features
@@ -257,7 +257,7 @@ class Interrogator():
     def rank_top(self, image_features: torch.Tensor, text_array: List[str], reverse: bool=False) -> str:
         self._prepare_clip()
         text_tokens = self.tokenize([text for text in text_array]).to(self.device)
-        with torch.no_grad(), torch.cuda.amp.autocast():
+        with torch.no_grad(), torch.amp.autocast("xpu"):
             text_features = self.clip_model.encode_text(text_tokens)
             text_features /= text_features.norm(dim=-1, keepdim=True)
             similarity = text_features @ image_features.T
@@ -268,7 +268,7 @@ class Interrogator():
     def similarity(self, image_features: torch.Tensor, text: str) -> float:
         self._prepare_clip()
         text_tokens = self.tokenize([text]).to(self.device)
-        with torch.no_grad(), torch.cuda.amp.autocast():
+        with torch.no_grad(), torch.amp.autocast("xpu"):
             text_features = self.clip_model.encode_text(text_tokens)
             text_features /= text_features.norm(dim=-1, keepdim=True)
             similarity = text_features @ image_features.T
@@ -277,7 +277,7 @@ class Interrogator():
     def similarities(self, image_features: torch.Tensor, text_array: List[str]) -> List[float]:
         self._prepare_clip()
         text_tokens = self.tokenize([text for text in text_array]).to(self.device)
-        with torch.no_grad(), torch.cuda.amp.autocast():
+        with torch.no_grad(), torch.amp.autocast("xpu"):
             text_features = self.clip_model.encode_text(text_tokens)
             text_features /= text_features.norm(dim=-1, keepdim=True)
             similarity = text_features @ image_features.T
@@ -319,7 +319,7 @@ class LabelTable():
             chunks = np.array_split(self.labels, max(1, len(self.labels)/config.chunk_size))
             for chunk in tqdm(chunks, desc=f"Preprocessing {desc}" if desc else None, disable=self.config.quiet):
                 text_tokens = self.tokenize(chunk).to(self.device)
-                with torch.no_grad(), torch.cuda.amp.autocast():
+                with torch.no_grad(), torch.amp.autocast("xpu"):
                     text_features = clip_model.encode_text(text_tokens)
                     text_features /= text_features.norm(dim=-1, keepdim=True)
                     text_features = text_features.half().cpu().numpy()
@@ -373,7 +373,7 @@ class LabelTable():
     def _rank(self, image_features: torch.Tensor, text_embeds: torch.Tensor, top_count: int=1, reverse: bool=False) -> str:
         top_count = min(top_count, len(text_embeds))
         text_embeds = torch.stack([torch.from_numpy(t) for t in text_embeds]).to(self.device)
-        with torch.cuda.amp.autocast():
+        with torch.amp.autocast("xpu"):
             similarity = image_features @ text_embeds.T
             if reverse:
                 similarity = -similarity
